@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Jarvis</title>
+  <meta name="description" content="Talk through a rough idea and turn it into something concrete.">
+  <meta name="theme-color" content="#0f1413">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#composer-input">Skip to message box</a>
+
+  <header class="top">
+    <div class="brand" aria-label="Jarvis"><span class="brand-mark" aria-hidden="true"></span>Jarvis</div>
+    <div class="top-actions">
+      <button id="model-chip" class="chip" type="button" aria-haspopup="dialog" aria-controls="model-picker">
+        <span class="chip-label">Model</span>
+        <strong id="model-chip-name">Auto</strong>
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button id="open-settings" class="icon-btn" type="button" aria-label="Settings" aria-haspopup="dialog" aria-controls="settings">
+        <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="16" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="10" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage" aria-label="Jarvis voice">
+      <button id="orb-button" class="orb-button" type="button" aria-describedby="status">
+        <canvas id="orb" data-state="idle" aria-hidden="true"></canvas>
+        <span class="visually-hidden" id="orb-label">Talk to Jarvis</span>
+      </button>
+      <p id="status" class="status" role="status" aria-live="polite">Ready. Talk or type to start.</p>
+      <p id="live-transcript" class="live-transcript" aria-live="polite" hidden></p>
+
+      <div class="actions" id="primary-actions">
+        <button id="talk" class="btn btn-primary" type="button">
+          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+          Talk to Jarvis
+        </button>
+        <button id="type" class="btn" type="button">
+          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M7 10h1M11 10h1M15 10h1M8 14h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          Type a message
+        </button>
+      </div>
+
+      <div class="session" id="session-actions" hidden>
+        <button id="done-speaking" class="btn btn-primary" type="button" hidden>Done speaking</button>
+        <button id="interrupt" class="btn btn-primary" type="button" hidden>Interrupt</button>
+        <button id="stop-thinking" class="btn" type="button" hidden>Stop</button>
+        <label class="toggle"><input type="checkbox" id="handsfree"> <span>Hands-free</span></label>
+        <button id="end" class="btn btn-quiet" type="button">End conversation</button>
+      </div>
+      <p id="voice-notice" class="notice" role="alert" hidden></p>
+    </section>
+
+    <section class="conversation" aria-label="Conversation">
+      <ol id="log" class="log"></ol>
+      <div id="suggestions" class="suggestions" aria-label="Suggested replies"></div>
+      <form id="composer" class="composer" hidden>
+        <label for="composer-input" class="visually-hidden">Message Jarvis</label>
+        <textarea id="composer-input" rows="1" placeholder="Describe your idea, however rough…" autocomplete="off"></textarea>
+        <button class="btn btn-primary send" type="submit" id="send">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="model-picker" class="sheet sheet-small" aria-labelledby="model-picker-title">
+    <div class="sheet-head">
+      <h2 id="model-picker-title">Which model answers?</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close">✕</button>
+    </div>
+    <p class="hint">Switching keeps the whole conversation; the next reply comes from the model you pick.</p>
+    <div id="model-options" class="model-options" role="radiogroup" aria-labelledby="model-picker-title"></div>
+    <p class="hint"><button type="button" class="link" id="picker-manage">Manage connections</button></p>
+  </dialog>
+
+  <dialog id="settings" class="sheet" aria-labelledby="settings-title">
+    <div class="sheet-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Close settings">✕</button>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Settings sections">
+      <button role="tab" id="tab-connections" aria-controls="panel-connections" aria-selected="true">Connections</button>
+      <button role="tab" id="tab-model" aria-controls="panel-model" aria-selected="false" tabindex="-1">Model settings</button>
+      <button role="tab" id="tab-voice" aria-controls="panel-voice" aria-selected="false" tabindex="-1">Voice</button>
+      <button role="tab" id="tab-memory" aria-controls="panel-memory" aria-selected="false" tabindex="-1">Memory</button>
+      <button role="tab" id="tab-general" aria-controls="panel-general" aria-selected="false" tabindex="-1">General</button>
+    </div>
+    <div class="panels">
+      <section role="tabpanel" id="panel-connections" aria-labelledby="tab-connections" tabindex="0"></section>
+      <section role="tabpanel" id="panel-model" aria-labelledby="tab-model" tabindex="0" hidden></section>
+      <section role="tabpanel" id="panel-voice" aria-labelledby="tab-voice" tabindex="0" hidden></section>
+      <section role="tabpanel" id="panel-memory" aria-labelledby="tab-memory" tabindex="0" hidden></section>
+      <section role="tabpanel" id="panel-general" aria-labelledby="tab-general" tabindex="0" hidden></section>
+    </div>
+  </dialog>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
