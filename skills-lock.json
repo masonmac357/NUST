@@ -1,4 +1,26 @@
 {
-  "version": 1,
-  "skills": {}
+  "version": 2,
+  "skills": {
+    "fish-audio-agents": {
+      "source": "docs.fish.audio",
+      "sourceUrl": "https://docs.fish.audio",
+      "sourceType": "well-known",
+      "computedHash": "161f1600212a752cf3c8231689b803d84b986fd14011725ac4fdf5b163484804",
+      "wellKnownDigest": "sha256:d1538c485608220e3340b70dfae5a27217b159b351b37320b1f1d97a726a585a"
+    },
+    "fish-audio-api": {
+      "source": "docs.fish.audio",
+      "sourceUrl": "https://docs.fish.audio",
+      "sourceType": "well-known",
+      "computedHash": "09995b79974a962ccd26c20b1f42e51557298b53ccf96038f83b7125ca8de0a1",
+      "wellKnownDigest": "sha256:b46ecf7830c6488b7d4b56c5bd53cf4f355ef512748af2371c48f9c241905787"
+    },
+    "fish-audio-sdk": {
+      "source": "docs.fish.audio",
+      "sourceUrl": "https://docs.fish.audio",
+      "sourceType": "well-known",
+      "computedHash": "d75898d754fbc7e3e0ed8c3cf69c92b8f2af7bdc600c0aea33d7443ce6cf9a9e",
+      "wellKnownDigest": "sha256:a4f19c9ff2684c38995f340619fcaa89f019bf18326106489096d38fb4ae0b65"
+    }
+  }
 }
