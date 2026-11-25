@@ -131,6 +131,10 @@ pre { background: #0b0f0e; border: 1px solid var(--line); border-radius: var(--r
 .error-card h3 { color: var(--danger); }
 .memory-card { border-color: #3c4f3b; background: #151d15; }
 
+.needs-key .log:empty::before { display: none; }
+.onboard { margin-top: 4px; }
+.onboard h3 { font-size: 17px; margin-bottom: 6px; }
+.onboard .inline { margin: 6px 0 4px; }
 .suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 0; }
 .suggestions:empty { display: none; }
 .suggestion { border: 1px solid var(--line-2); background: transparent; border-radius: 999px; padding: 8px 14px; cursor: pointer; text-align: left; min-height: 40px; }

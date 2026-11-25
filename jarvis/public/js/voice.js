@@ -13,7 +13,10 @@ export class Voice {
     this.SR = SR || null;
     this.synth = globalThis.speechSynthesis || null;
     this.supported = { recognition: !!SR, synthesis: !!this.synth, mic: !!navigator.mediaDevices?.getUserMedia };
-    this.settings = { voiceURI: '', rate: 1, lang: '' };
+    // allowCloud: false keeps all speech on this device. Browsers' built-in
+    // recognisers and "online" voices otherwise send audio or text to the
+    // browser maker's servers, which would break "only talks to Claude".
+    this.settings = { voiceURI: '', rate: 1, lang: '', allowCloud: false };
     this.listening = false;
     this.speaking = false;
     this.rec = null;
@@ -33,6 +36,42 @@ export class Voice {
     try { return this.synth ? this.synth.getVoices() : []; } catch { return []; }
   }
 
+  // Voices Jarvis may use under the current privacy setting.
+  usableVoices() {
+    const all = this.voices();
+    return this.settings.allowCloud ? all : all.filter((v) => v.localService);
+  }
+
+  pickVoice() {
+    const usable = this.usableVoices();
+    const chosen = usable.find((v) => v.voiceURI === this.settings.voiceURI);
+    if (chosen) return chosen;
+    const prefix = this.lang().slice(0, 2).toLowerCase();
+    return usable.find((v) => v.lang?.toLowerCase() === this.lang().toLowerCase())
+      || usable.find((v) => v.lang?.toLowerCase().startsWith(prefix))
+      || (this.settings.allowCloud ? null : usable[0] || null);
+  }
+
+  // Is on-device recognition ready for this language? Uses the Web Speech
+  // on-device API where the browser has it; anything else would stream audio
+  // to an online service, so it is refused unless allowCloud is on.
+  async localRecognition(lang) {
+    const SR = this.SR;
+    if (typeof SR?.available !== 'function') {
+      return { ok: false, code: 'no-local-recognition', message: 'This browser can only understand speech by sending your audio to its own online service, not Claude. Allow that below, or type instead.' };
+    }
+    let status;
+    try { status = await SR.available({ langs: [lang], processLocally: true }); } catch { status = 'unavailable'; }
+    if (status === 'available') return { ok: true };
+    if ((status === 'downloadable' || status === 'downloading') && typeof SR.install === 'function') {
+      this.h.onStatus?.(`Downloading on-device speech recognition for ${lang}\u2026`);
+      let ok = false;
+      try { ok = await SR.install({ langs: [lang], processLocally: true }); } catch { ok = false; }
+      if (ok) return { ok: true };
+    }
+    return { ok: false, code: 'no-local-recognition', message: `On-device speech recognition isn\u2019t available for ${lang} in this browser. Allow the browser\u2019s online speech service below, or type instead.` };
+  }
+
   lang() {
     return this.settings.lang || navigator.language || 'en-US';
   }
@@ -43,6 +82,10 @@ export class Voice {
     if (!this.supported.recognition) {
       this.h.onError?.({ code: 'no-recognition', message: 'This browser can’t turn speech into text. Try Chrome, Edge or Safari, or type your message instead.' });
       return false;
+    }
+    if (!this.settings.allowCloud) {
+      const local = await this.localRecognition(this.lang());
+      if (!local.ok) { this.h.onError?.(local); return false; }
     }
     // Ask for the microphone ourselves first: it gives a clear permission
     // error and feeds the orb's level meter.
@@ -70,6 +113,7 @@ export class Voice {
     rec.interimResults = true;
     rec.continuous = false;
     rec.maxAlternatives = 1;
+    if (!this.settings.allowCloud) rec.processLocally = true;
     rec.onresult = (ev) => {
       if (this.speaking) return; // never hear ourselves
       let interim = '';
@@ -171,7 +215,11 @@ export class Voice {
     this.synth.cancel();
     const token = ++this.speakToken;
     const chunks = (text.match(/[^.!?\n]+[.!?]*\s*/g) || [text]).map((s) => s.trim()).filter(Boolean);
-    const voice = this.voices().find((v) => v.voiceURI === this.settings.voiceURI);
+    const voice = this.pickVoice();
+    if (!voice && !this.settings.allowCloud) {
+      this.h.onError?.({ code: 'no-local-voice', message: 'No on-device voice is installed for reading replies aloud. Add one in your system\u2019s speech settings, or allow online voices in Settings \u203a Voice.' });
+      return Promise.resolve(false);
+    }
     this.speaking = true;
     this.h.onSpeakStart?.();
     return new Promise((resolve) => {

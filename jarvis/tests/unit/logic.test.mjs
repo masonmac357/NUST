@@ -2,14 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyTask, chooseModel } from '../../public/js/router.js';
 import { parseReply, systemPrompt, speakable } from '../../public/js/coach.js';
-import { demoReply, topicOf } from '../../public/js/demo.js';
+import { demoReply, topicOf } from '../e2e/scripted-claude.mjs';
 import { PARAMS, coerce, checkValue } from '../../public/js/params.js';
 
 const cands = [
-  { key: 'a', model: 'gpt-4.1-mini', providerId: 'openai', local: false, demo: false },
-  { key: 'b', model: 'claude-opus-5-5', providerId: 'anthropic', local: false, demo: false },
-  { key: 'c', model: 'qwen2.5-coder:7b', providerId: 'ollama', local: true, demo: false },
-  { key: 'd', model: 'jarvis-demo', providerId: 'demo', local: true, demo: true },
+  { key: 'o', model: 'claude-opus-5-5' },
+  { key: 's', model: 'claude-sonnet-5-5' },
+  { key: 'h', model: 'claude-haiku-5-5' },
 ];
 
 test('task classification', () => {
@@ -19,26 +18,17 @@ test('task classification', () => {
   assert.equal(classifyTask('yes', { turn: 2 }), 'quick');
 });
 
-test('Auto picks by task and priority, and explains why', () => {
+test('Auto picks among Claude models by task and priority, and explains why', () => {
   const plan = chooseModel(cands, 'Help me plan the strategy for launching this', { priority: 'quality' });
-  assert.equal(plan.choice.key, 'b');
-  assert.match(plan.reason, /planning or reasoning/);
+  assert.equal(plan.choice.key, 'o');
+  assert.match(plan.reason, /planning or reasoning.*most capable/);
   const quick = chooseModel(cands, 'ok sure', { priority: 'speed' }, { turn: 3 });
-  assert.notEqual(quick.choice.key, 'b');
+  assert.equal(quick.choice.key, 'h');
+  assert.match(quick.reason, /fastest/);
   const code = chooseModel(cands, 'fix this regex bug in my code', {});
-  assert.ok(['b', 'c'].includes(code.choice.key));
-  const local = chooseModel(cands, 'tell me about my idea', { preferLocal: true });
-  assert.equal(local.choice.key, 'c');
-  assert.match(local.reason, /locally/);
-});
-
-test('Auto never picks the simulated model when a real one exists', () => {
-  for (const pri of ['balanced', 'speed', 'quality']) {
-    assert.notEqual(chooseModel(cands, 'hi', { priority: pri }).choice.key, 'd');
-  }
-  const only = chooseModel([cands[3]], 'hi', {});
-  assert.equal(only.choice.key, 'd');
-  assert.match(only.reason, /only model/);
+  assert.ok(['o', 's'].includes(code.choice.key));
+  const only = chooseModel([cands[1]], 'hi', {});
+  assert.match(only.reason, /only Claude model/);
 });
 
 test('reply markup is parsed out of the visible text', () => {
@@ -58,7 +48,7 @@ test('system prompt asks one question at a time and carries memories', () => {
   assert.equal(speakable('**Your goal:** do `x`'), 'Your goal: do x');
 });
 
-test('the demo follows the question-then-summary flow, grounded in the user’s words', () => {
+test('the scripted test double follows the question-then-summary flow, grounded in the user’s words', () => {
   const m = [{ role: 'user', content: 'I want to build a tool for my running club' }];
   const r1 = parseReply(demoReply(m));
   assert.match(r1.text, /tool for my running club/);
@@ -79,9 +69,9 @@ test('the demo follows the question-then-summary flow, grounded in the user’s 
 test('param coercion and checks', () => {
   assert.equal(coerce(PARAMS.temperature, ''), undefined);
   assert.equal(coerce(PARAMS.temperature, '0.4'), 0.4);
-  assert.ok(Number.isNaN(coerce(PARAMS.seed, 'abc')));
+  assert.ok(Number.isNaN(coerce(PARAMS.top_k, 'abc')));
   assert.deepEqual(coerce(PARAMS.stop, 'a\n\nb'), ['a', 'b']);
   assert.equal(coerce(PARAMS.stream, 'false'), false);
-  assert.match(checkValue(PARAMS.seed, 1.5), /whole number/);
+  assert.match(checkValue(PARAMS.top_k, 1.5), /whole number/);
   assert.equal(checkValue(PARAMS.top_p, 0.5), null);
 });

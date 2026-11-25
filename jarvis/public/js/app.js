@@ -1,7 +1,7 @@
 import { PARAMS, coerce } from './params.js';
 import {
-  PROVIDERS, PROVIDER_ORDER, getProvider, describeControls, effectiveParams, validateSettings,
-  buildRequest, redactHeaders, isLocalConnection, ANTHROPIC_DEFAULT_MAX_TOKENS,
+  DEFAULT_MODELS, DEFAULT_BASE_URL, describeControls, effectiveParams, validateSettings,
+  buildRequest, redactHeaders, defaultMaxTokens,
 } from './providers.js';
 import { chooseModel } from './router.js';
 import { systemPrompt, parseReply, speakable } from './coach.js';
@@ -12,14 +12,13 @@ import { load, save, uid, settingsKey } from './store.js';
 
 // ------------------------------------------------------------------ state
 
-const DEMO_CONN = { id: 'demo', providerId: 'demo', name: 'Jarvis Demo', baseUrl: '', apiKey: '', models: ['jarvis-demo'], available: [], modelMeta: {} };
-
 const state = {
-  connections: load('connections', [DEMO_CONN]),
+  // Claude is the only provider; anything else saved by an older version is dropped.
+  connections: load('connections', []).filter((c) => c.providerId === 'anthropic'),
   settings: load('settings', {}),
   presets: load('presets', []),
-  prefs: { selection: 'auto', priority: 'balanced', preferLocal: false, motion: 'auto', speakTyped: false, handsfree: false, autoExcluded: {}, ...load('prefs', {}) },
-  voiceSettings: { voiceURI: '', rate: 1, lang: '', ...load('voice', {}) },
+  prefs: { selection: 'auto', priority: 'balanced', motion: 'auto', speakTyped: false, handsfree: false, autoExcluded: {}, ...load('prefs', {}) },
+  voiceSettings: { voiceURI: '', rate: 1, lang: '', allowCloud: false, ...load('voice', {}) },
   memories: load('memories', []),
   messages: load('conversation', []),
   phase: 'idle',
@@ -76,10 +75,8 @@ function richText(s) {
 function allModels() {
   const out = [];
   for (const conn of state.connections) {
-    const prov = PROVIDERS[conn.providerId];
-    if (!prov) continue;
     for (const model of conn.models) {
-      out.push({ key: settingsKey(conn.id, model), conn, connId: conn.id, connName: conn.name, providerId: conn.providerId, providerName: prov.name, model, local: isLocalConnection(conn), demo: conn.providerId === 'demo' });
+      out.push({ key: settingsKey(conn.id, model), conn, connId: conn.id, connName: conn.name, model });
     }
   }
   return out;
@@ -127,13 +124,17 @@ const voice = new Voice({
     }
   },
   onError(err) {
-    showVoiceNotice(err.message);
+    const privacy = err.code === 'no-local-recognition' || err.code === 'no-local-voice';
+    showVoiceNotice(err.message, privacy ? { label: 'Allow browser speech service', run: allowCloudSpeech } : null);
+    if (err.code === 'no-local-voice') { setPhase('idle', 'Reply shown, but not read aloud.'); return; }
     state.voiceSession = false;
-    setPhase('error', err.code === 'mic-blocked' ? 'Microphone blocked. You can type instead.' : 'Voice isn’t available. You can type instead.');
+    setPhase('error', err.code === 'mic-blocked' ? 'Microphone blocked. You can type instead.'
+      : privacy ? 'Voice needs your OK. You can type instead.' : 'Voice isn\u2019t available. You can type instead.');
     openComposer(false);
     setTimeout(() => { if (state.phase === 'error') setPhase('idle'); }, 4000);
   },
   onLevel(v) { orb.setLevel(v); },
+  onStatus(text) { $('#status').textContent = text; },
   onWord() { orb.word(); },
   onSpeakStart() { setPhase('speaking'); },
   onSpeakEnd(completed) {
@@ -188,10 +189,20 @@ function hideTranscript() {
   el.textContent = '';
 }
 
-function showVoiceNotice(text) {
+function showVoiceNotice(text, action) {
   const n = $('#voice-notice');
-  n.textContent = text;
+  n.replaceChildren(h('span', { text }));
+  if (action) n.append(' ', h('button', { class: 'btn btn-small', type: 'button', id: 'allow-cloud-speech', text: action.label, onclick: action.run }));
   n.hidden = !text;
+}
+
+function allowCloudSpeech() {
+  state.voiceSettings.allowCloud = true;
+  Object.assign(voice.settings, state.voiceSettings);
+  persist();
+  showVoiceNotice('');
+  toast('Online speech allowed. Your browser\u2019s speech service will hear what you say. Change this in Settings \u203a Voice.');
+  startTalking();
 }
 
 async function startTalking() {
@@ -287,10 +298,10 @@ async function send(text, { voice: voiceTurn = false, retryOf = null } = {}) {
 
   const target = routeFor(userMsg.content, voiceTurn);
   if (!target) {
-    return fail(userMsg, { title: 'No model is connected', message: 'Add a connection in Settings so Jarvis has a model to answer with.', action: 'connections' });
+    return fail(userMsg, { title: 'Claude isn\u2019t connected yet', message: 'Add your Anthropic API key so Jarvis can answer.', action: 'connections' });
   }
   const saved = state.settings[target.key] || {};
-  const blocking = validateSettings(target.providerId, target.model, target.conn.modelMeta?.[target.model], saved).filter((i) => i.level === 'error');
+  const blocking = validateSettings(target.model, target.conn.modelMeta?.[target.model], saved).filter((i) => i.level === 'error');
   if (blocking.length) {
     const def = PARAMS[blocking[0].param];
     return fail(userMsg, {
@@ -305,7 +316,7 @@ async function send(text, { voice: voiceTurn = false, retryOf = null } = {}) {
   setPhase('thinking');
   const asst = {
     id: uid(), role: 'assistant', content: '', status: 'streaming',
-    meta: { key: target.key, connId: target.connId, connName: target.connName, providerName: target.providerName, model: target.model, auto: target.auto, reason: target.reason, demo: target.demo },
+    meta: { key: target.key, connId: target.connId, connName: target.connName, model: target.model, auto: target.auto, reason: target.reason },
   };
   state.messages.push(asst);
   renderLog();
@@ -320,7 +331,15 @@ async function send(text, { voice: voiceTurn = false, retryOf = null } = {}) {
       onDelta: (t) => updateBubble(asst.id, parseReply(t).text, true),
     });
     const parsed = parseReply(res.text);
-    asst.content = parsed.text || '(The model sent back an empty reply.)';
+    if (res.model && res.model !== target.model) asst.meta.servedBy = res.model;
+    if (res.fallback) asst.meta.fallback = res.fallback;
+    asst.meta.stopReason = res.stopReason;
+    if (res.stopReason === 'refusal') {
+      const d = res.stopDetails || {};
+      parsed.text = `${parsed.text ? `${parsed.text}\n\n` : ''}Claude declined to continue with this request${d.category ? ` (${d.category})` : ''}.${d.explanation ? ` ${d.explanation}` : ''} You can rephrase it and try again.`;
+      parsed.replies = [];
+    }
+    asst.content = parsed.text || '(Claude sent back an empty reply.)';
     asst.replies = parsed.replies;
     asst.remember = parsed.remember
       .filter((r) => !state.memories.some((m) => m.text.toLowerCase() === r.toLowerCase()))
@@ -348,12 +367,13 @@ async function send(text, { voice: voiceTurn = false, retryOf = null } = {}) {
       fail(userMsg, { title: 'Stopped', message: 'You stopped this reply. Your message is kept.', stopped: true });
       return;
     }
-    const prov = PROVIDERS[target.providerId];
-    const param = e.param && (PARAMS[e.param] || describeControls(target.providerId, target.model).extras.find((x) => x.id === e.param)) ? e.param : null;
-    const label = param ? (PARAMS[param]?.label || describeControls(target.providerId, target.model).extras.find((x) => x.id === param)?.label) : null;
+    const extrasDefs = describeControls(target.model).extras;
+    const param = e.param && (PARAMS[e.param] || extrasDefs.find((x) => x.id === e.param)) ? e.param : null;
+    const label = param ? (PARAMS[param]?.label || extrasDefs.find((x) => x.id === param)?.label) : null;
+    const authHint = e.status === 401 ? ' Check the API key under Settings \u203a Connections.' : e.status === 429 ? ' You have hit a rate limit; wait a moment and retry.' : e.status === 529 || e.status === 503 ? ' Claude is busy right now; retry shortly.' : '';
     fail(userMsg, {
-      title: e.network ? `Couldn’t reach ${target.connName}` : `${prov?.name || 'The provider'} rejected the request${e.status ? ` (${e.status})` : ''}`,
-      message: e.message || String(e),
+      title: e.network ? `Couldn\u2019t reach Claude` : `Claude rejected the request${e.status ? ` (${e.status})` : ''}`,
+      message: (e.message || String(e)) + authHint,
       param, paramLabel: label, key: target.key, model: target.model,
       request: e.request,
     });
@@ -391,10 +411,12 @@ function renderMessage(m) {
   const bubble = h('div', { class: `bubble${m.status === 'streaming' ? ' typing' : ''}`, html: richText(m.content) });
   li.append(h('span', { class: 'visually-hidden', text: m.role === 'user' ? 'You said:' : 'Jarvis said:' }), bubble);
   if (m.role === 'assistant' && m.meta) {
+    const served = m.meta.servedBy || m.meta.model;
     const meta = h('div', { class: 'meta', dataset: { testid: 'answered-by' } },
-      h('span', {}, 'Answered by ', h('span', { class: 'who', text: m.meta.model }), ` via ${m.meta.connName}`),
-      m.meta.demo ? h('span', { class: 'sim-badge', text: 'simulated' }) : null,
-      h('span', { class: 'why', text: m.meta.auto ? `Auto chose it because ${m.meta.reason}.` : 'You picked this model.' }),
+      h('span', {}, 'Answered by ', h('span', { class: 'who', text: served }), state.connections.length > 1 ? ` via ${m.meta.connName}` : ''),
+      m.meta.servedBy ? h('span', { class: 'sim-badge', text: m.meta.fallback ? `fallback from ${m.meta.model}` : `requested ${m.meta.model}` }) : null,
+      h('span', { class: 'why', text: m.meta.auto ? `Auto chose ${m.meta.model} because ${m.meta.reason}.` : 'You picked this model.' }),
+      m.meta.stopReason === 'max_tokens' ? h('span', { class: 'sim-badge', text: 'cut off at the output limit' }) : null,
     );
     li.append(meta);
     if (m.request) {
@@ -412,7 +434,7 @@ function renderErrorCard(m) {
   if (e.param && e.key) {
     row.append(h('button', { class: 'btn btn-small btn-primary', type: 'button', text: `Fix ${e.paramLabel || e.param}`, onclick: () => openSettingsAt(e.key, e.param) }));
   } else if (e.action === 'connections') {
-    row.append(h('button', { class: 'btn btn-small btn-primary', type: 'button', text: 'Open connections', onclick: () => openSettings('connections') }));
+    row.append(h('button', { class: 'btn btn-small btn-primary', type: 'button', text: 'Connect Claude', onclick: () => openSettings('connections') }));
   } else if (e.key && !e.stopped) {
     row.append(h('button', { class: 'btn btn-small', type: 'button', text: 'Model settings', onclick: () => openSettingsAt(e.key) }));
   }
@@ -487,10 +509,10 @@ function openPicker() {
     groups.get(m.connId).push(m);
   }
   for (const list of groups.values()) {
-    box.append(h('div', { class: 'group-label', text: `${list[0].connName} · ${list[0].providerName}` }));
-    for (const m of list) box.append(opt(m.key, m.model, m.demo ? 'Simulated, no account needed' : (state.settings[m.key]?.params && Object.keys(state.settings[m.key].params).length ? 'Custom settings' : 'Provider defaults')));
+    if (groups.size > 1) box.append(h('div', { class: 'group-label', text: list[0].connName }));
+    for (const m of list) box.append(opt(m.key, m.model, state.settings[m.key]?.params && Object.keys(state.settings[m.key].params).length ? 'Custom settings' : 'Default settings'));
   }
-  if (!allModels().length) box.append(h('p', { class: 'empty', text: 'No models yet. Add a connection first.' }));
+  if (!allModels().length) box.append(h('p', { class: 'empty', text: 'No Claude models yet. Connect Claude first.' }));
   $('#model-picker').showModal();
 }
 
@@ -539,24 +561,90 @@ function openSettingsAt(key, param) {
   }
 }
 
-// ---- Connections
+// ---- Connections (Claude only)
+
+function newConnection({ name, apiKey, baseUrl }) {
+  return {
+    id: uid(), providerId: 'anthropic',
+    name: name || (state.connections.length ? `Claude ${state.connections.length + 1}` : 'Claude'),
+    baseUrl: baseUrl || DEFAULT_BASE_URL, apiKey,
+    models: [...DEFAULT_MODELS], available: [], modelMeta: {},
+  };
+}
+
+// Ask Anthropic which models this key can use. Returns { ok, error, status }.
+async function refreshModels(conn) {
+  try {
+    const found = await discoverModels(conn);
+    conn.available = found.map((f) => f.id);
+    conn.modelMeta = conn.modelMeta || {};
+    for (const f of found) conn.modelMeta[f.id] = slimMeta(f.meta);
+    persist();
+    return { ok: true, count: found.length };
+  } catch (e) {
+    return { ok: false, error: e.message, status: e.status };
+  }
+}
+
+function slimMeta(meta) {
+  if (!meta || typeof meta !== 'object') return {};
+  const out = {};
+  for (const k of ['display_name', 'max_tokens', 'max_input_tokens']) if (meta[k] !== undefined) out[k] = meta[k];
+  return out;
+}
+
+async function connectWithKey({ apiKey, name, baseUrl }, statusEl) {
+  const conn = newConnection({ apiKey, name, baseUrl });
+  statusEl.className = 'status-line';
+  statusEl.textContent = 'Checking your key with Anthropic\u2026';
+  const r = await refreshModels(conn);
+  if (!r.ok && (r.status === 401 || r.status === 403)) {
+    statusEl.className = 'status-line err';
+    statusEl.textContent = `Anthropic rejected that key: ${r.error}`;
+    return null;
+  }
+  state.connections.push(conn);
+  persist();
+  updateChip();
+  renderOnboarding();
+  toast(r.ok ? 'Claude is connected.' : `Saved. Couldn\u2019t check the key yet (${r.error}).`);
+  return conn;
+}
+
+function renderOnboarding() {
+  const box = $('#onboarding');
+  document.body.classList.toggle('needs-key', !state.connections.length);
+  if (state.connections.length) { box.hidden = true; box.replaceChildren(); return; }
+  const key = h('input', { class: 'input', id: 'onboard-key', type: 'password', autocomplete: 'off', placeholder: 'sk-ant-\u2026', 'aria-label': 'Anthropic API key' });
+  const status = h('p', { class: 'status-line', role: 'status' });
+  box.hidden = false;
+  box.replaceChildren(h('form', { class: 'card onboard', onsubmit: async (e) => {
+    e.preventDefault();
+    const apiKey = key.value.trim();
+    if (!apiKey) { key.focus(); status.className = 'status-line err'; status.textContent = 'Paste your API key first.'; return; }
+    await connectWithKey({ apiKey }, status);
+  } },
+  h('h3', { text: 'Connect Claude to begin' }),
+  h('p', { text: 'Jarvis talks only to Claude. Paste an Anthropic API key; it is stored on this computer and sent only to Anthropic.' }),
+  h('div', { class: 'inline' }, key, h('button', { class: 'btn btn-primary btn-small', type: 'submit', text: 'Connect' })),
+  h('p', { class: 'conn-sub', html: 'No key yet? Create one at <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noreferrer">platform.claude.com</a>.' }),
+  status));
+}
 
 function renderConnections() {
   const panel = $('#panel-connections');
   panel.replaceChildren(
-    h('p', { class: 'lead', text: 'Connect as many providers as you like. Keys stay in this browser and are only sent to that provider, through the Jarvis server running on your computer.' }),
-    h('h3', { text: 'Your connections' }),
+    h('p', { class: 'lead', text: 'Jarvis only talks to Claude. Add more than one key if you use separate accounts or workspaces; each key is sent only to Anthropic, through the Jarvis app running on this computer.' }),
   );
-  if (!state.connections.length) panel.append(h('p', { class: 'empty', text: 'No connections yet.' }));
+  if (!state.connections.length) panel.append(h('p', { class: 'empty', text: 'Claude isn\u2019t connected yet.' }));
   for (const conn of state.connections) panel.append(renderConnection(conn));
   panel.append(renderAddConnection());
 }
 
 function renderConnection(conn) {
-  const prov = PROVIDERS[conn.providerId];
   const statusLine = h('p', { class: 'status-line', role: 'status' });
   const card = h('div', { class: 'conn', dataset: { conn: conn.id } });
-  const modelInput = h('input', { class: 'input', placeholder: 'Model ID, e.g. ' + exampleModel(conn.providerId), list: `dl-${conn.id}`, 'aria-label': `Model ID to add to ${conn.name}` });
+  const modelInput = h('input', { class: 'input', placeholder: 'Model ID, e.g. claude-sonnet-5-5', list: `dl-${conn.id}`, 'aria-label': `Model ID to add to ${conn.name}` });
   const datalist = h('datalist', { id: `dl-${conn.id}` }, (conn.available || []).map((m) => h('option', { value: m })));
   const addModel = (id) => {
     id = String(id || '').trim();
@@ -572,64 +660,41 @@ function renderConnection(conn) {
       h('label', { title: 'Let Auto pick this model' },
         h('input', { type: 'checkbox', checked: !state.prefs.autoExcluded[key] || undefined, onchange: (e) => { if (e.target.checked) delete state.prefs.autoExcluded[key]; else state.prefs.autoExcluded[key] = true; persist(); } }),
         'Auto'),
-      h('button', { type: 'button', 'aria-label': `Remove ${m}`, text: '✕', onclick: () => { conn.models = conn.models.filter((x) => x !== m); if (state.prefs.selection === key) state.prefs.selection = 'auto'; persist(); renderConnections(); updateChip(); } }));
+      h('button', { type: 'button', 'aria-label': `Remove ${m}`, text: '\u2715', onclick: () => { conn.models = conn.models.filter((x) => x !== m); if (state.prefs.selection === key) state.prefs.selection = 'auto'; persist(); renderConnections(); updateChip(); } }));
   }));
-  if (!conn.models.length) models.append(h('span', { class: 'empty', text: 'No models added yet. Discover them or type an ID.' }));
-
+  if (!conn.models.length) models.append(h('span', { class: 'empty', text: 'No models turned on. Add one below.' }));
+  const unknown = conn.available?.length ? conn.models.filter((m) => !conn.available.includes(m)) : [];
   const quick = (conn.available || []).filter((m) => !conn.models.includes(m));
   const quickRow = quick.length
-    ? h('div', { class: 'models' },
-      h('span', { class: 'conn-sub', text: `Found ${conn.available.length}:` }),
-      quick.slice(0, 12).map((m) => h('button', { type: 'button', class: 'suggestion btn-small', text: `+ ${m}`, onclick: () => addModel(m) })),
-      quick.length > 12 ? h('span', { class: 'conn-sub', text: `and ${quick.length - 12} more in the box above` }) : null)
+    ? h('div', { class: 'models' }, h('span', { class: 'conn-sub', text: 'Also available to this key:' }),
+      quick.slice(0, 12).map((m) => h('button', { type: 'button', class: 'suggestion btn-small', text: `+ ${m}`, onclick: () => addModel(m) })))
     : null;
-
-  const discover = async () => {
+  const check = async () => {
     statusLine.className = 'status-line';
-    statusLine.textContent = 'Looking for models…';
-    try {
-      const found = await discoverModels(conn, prov);
-      conn.available = found.map((f) => f.id).sort();
-      conn.modelMeta = conn.modelMeta || {};
-      for (const f of found) conn.modelMeta[f.id] = slimMeta(f.meta);
-      persist();
-      renderConnections();
-      const fresh = document.querySelector(`[data-conn="${conn.id}"] .status-line`);
-      if (fresh) { fresh.className = 'status-line ok'; fresh.textContent = found.length ? `Found ${found.length} models. Add the ones you want.` : 'Connected, but the server listed no models. Type an ID instead.'; }
-    } catch (e) {
-      statusLine.className = 'status-line err';
-      statusLine.textContent = `Discovery failed: ${e.message} You can still type a model ID.`;
-    }
+    statusLine.textContent = 'Asking Anthropic which models this key can use\u2026';
+    const r = await refreshModels(conn);
+    renderConnections();
+    const fresh = document.querySelector(`[data-conn="${conn.id}"] .status-line`);
+    if (!fresh) return;
+    fresh.className = `status-line ${r.ok ? 'ok' : 'err'}`;
+    fresh.textContent = r.ok ? `Key works. ${r.count} models available.` : `Check failed: ${r.error}`;
   };
-
-  const edit = h('details', {}, h('summary', { class: 'conn-sub', text: 'Edit connection' }), editConnectionForm(conn));
   card.append(
     h('div', { class: 'conn-head' },
-      h('div', {}, h('strong', { text: conn.name }), ' ', h('span', { class: conn.providerId === 'demo' ? 'sim-badge' : 'badge', text: conn.providerId === 'demo' ? 'simulated' : prov.name })),
-      h('button', { class: 'btn btn-small btn-quiet btn-danger', type: 'button', text: 'Remove', onclick: () => { removeConnection(conn); } })),
-    h('div', { class: 'conn-sub', text: conn.providerId === 'demo' ? prov.blurb : `${conn.baseUrl || prov.defaultBaseUrl} · ${conn.apiKey ? 'key saved' : prov.keyRequired ? 'no key yet' : 'no key needed'}` }),
+      h('div', {}, h('strong', { text: conn.name })),
+      h('button', { class: 'btn btn-small btn-quiet btn-danger', type: 'button', text: 'Remove', onclick: () => removeConnection(conn) })),
+    h('div', { class: 'conn-sub', text: `${conn.apiKey ? 'Key saved' : 'No key'}${conn.baseUrl && conn.baseUrl !== DEFAULT_BASE_URL ? ` \u00b7 via ${conn.baseUrl}` : ''}` }),
     models,
-    conn.providerId === 'demo' ? null : h('div', { class: 'inline' }, modelInput, datalist,
+    unknown.length ? h('p', { class: 'issue-line warning', text: `This key doesn\u2019t list ${unknown.join(', ')}; requests to ${unknown.length === 1 ? 'it' : 'them'} may fail.` }) : null,
+    h('div', { class: 'inline' }, modelInput, datalist,
       h('button', { class: 'btn btn-small', type: 'button', text: 'Add model', onclick: () => addModel(modelInput.value) }),
-      prov.discover ? h('button', { class: 'btn btn-small', type: 'button', text: 'Discover models', onclick: discover }) : null),
+      h('button', { class: 'btn btn-small', type: 'button', text: 'Check key & models', onclick: check })),
     quickRow,
     statusLine,
-    conn.providerId === 'demo' ? null : edit,
+    h('details', {}, h('summary', { class: 'conn-sub', text: 'Edit connection' }), editConnectionForm(conn)),
   );
   modelInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addModel(modelInput.value); } });
   return card;
-}
-
-function slimMeta(meta) {
-  if (!meta || typeof meta !== 'object') return {};
-  const keep = ['supported_parameters', 'context_length', 'top_provider', 'outputTokenLimit', 'maxTemperature', 'thinking', 'display_name'];
-  const out = {};
-  for (const k of keep) if (meta[k] !== undefined) out[k] = k === 'top_provider' ? { max_completion_tokens: meta[k]?.max_completion_tokens } : meta[k];
-  return out;
-}
-
-function exampleModel(pid) {
-  return { openai: 'gpt-4.1-mini', anthropic: 'claude-opus-5-5', gemini: 'gemini-2.5-flash', huggingface: 'meta-llama/Llama-3.1-8B-Instruct', openrouter: 'openai/gpt-4o-mini', ollama: 'llama3.2', compatible: 'local-model' }[pid] || 'model-id';
 }
 
 function removeConnection(conn) {
@@ -638,71 +703,48 @@ function removeConnection(conn) {
   if (state.prefs.selection.startsWith(`${conn.id}::`)) state.prefs.selection = 'auto';
   persist();
   renderConnections();
+  renderOnboarding();
   updateChip();
-  toast(`Removed ${conn.name}.`, { label: 'Undo', run: () => { state.connections = before; persist(); renderConnections(); updateChip(); } });
+  toast(`Removed ${conn.name}.`, { label: 'Undo', run: () => { state.connections = before; persist(); renderConnections(); renderOnboarding(); updateChip(); } });
 }
 
 function editConnectionForm(conn) {
-  const prov = PROVIDERS[conn.providerId];
   const name = h('input', { class: 'input', value: conn.name, 'aria-label': 'Connection name' });
-  const base = h('input', { class: 'input', value: conn.baseUrl || prov.defaultBaseUrl, 'aria-label': 'Base URL', inputmode: 'url' });
-  const key = h('input', { class: 'input', type: 'password', placeholder: conn.apiKey ? 'Leave blank to keep the saved key' : 'API key', autocomplete: 'off', 'aria-label': 'API key' });
+  const base = h('input', { class: 'input', value: conn.baseUrl || DEFAULT_BASE_URL, 'aria-label': 'API base URL', inputmode: 'url' });
+  const key = h('input', { class: 'input', type: 'password', placeholder: 'Leave blank to keep the saved key', autocomplete: 'off', 'aria-label': 'API key' });
   return h('form', { class: 'grid-2', onsubmit: (e) => {
     e.preventDefault();
     conn.name = name.value.trim() || conn.name;
-    conn.baseUrl = base.value.trim();
+    conn.baseUrl = base.value.trim() || DEFAULT_BASE_URL;
     if (key.value.trim()) conn.apiKey = key.value.trim();
     persist();
     renderConnections();
     toast('Connection updated.');
   } },
   h('label', { class: 'field' }, h('span', { text: 'Name' }), name),
-  h('label', { class: 'field' }, h('span', { text: 'Base URL' }), base),
-  h('label', { class: 'field' }, h('span', { text: 'API key' }), key),
-  h('div', { class: 'field' }, h('span', { html: '&nbsp;' }), h('div', { class: 'inline' },
-    h('button', { class: 'btn btn-small', type: 'submit', text: 'Save changes' }),
-    conn.apiKey ? h('button', { class: 'btn btn-small btn-quiet', type: 'button', text: 'Forget key', onclick: () => { conn.apiKey = ''; persist(); renderConnections(); } }) : null)));
+  h('label', { class: 'field' }, h('span', { text: 'New API key' }), key),
+  h('label', { class: 'field' }, h('span', { text: 'API base URL (only change this for an approved Claude gateway)' }), base),
+  h('div', { class: 'field' }, h('span', { html: '&nbsp;' }), h('div', { class: 'inline' }, h('button', { class: 'btn btn-small', type: 'submit', text: 'Save changes' }))));
 }
 
 function renderAddConnection() {
-  const sel = h('select', { class: 'input', id: 'new-provider' }, PROVIDER_ORDER.map((id) => h('option', { value: id, text: PROVIDERS[id].name })));
-  const blurb = h('p', { class: 'conn-sub' });
-  const name = h('input', { class: 'input', id: 'new-name' });
-  const base = h('input', { class: 'input', id: 'new-base', inputmode: 'url' });
-  const key = h('input', { class: 'input', id: 'new-key', type: 'password', autocomplete: 'off' });
-  const keyLabel = h('span', { text: 'API key' });
+  const name = h('input', { class: 'input', id: 'new-name', placeholder: 'e.g. Work' });
+  const key = h('input', { class: 'input', id: 'new-key', type: 'password', autocomplete: 'off', placeholder: 'sk-ant-\u2026' });
+  const base = h('input', { class: 'input', id: 'new-base', inputmode: 'url', value: DEFAULT_BASE_URL });
   const status = h('p', { class: 'status-line', role: 'status' });
-  const sync = () => {
-    const p = PROVIDERS[sel.value];
-    blurb.textContent = p.blurb;
-    name.value = p.name.replace(/ \(.*\)$/, '');
-    base.value = p.defaultBaseUrl;
-    base.disabled = p.id === 'demo';
-    keyLabel.textContent = p.keyRequired ? 'API key' : 'API key (optional)';
-  };
-  sel.addEventListener('change', sync);
-  sync();
   const form = h('form', { class: 'conn', id: 'add-connection', onsubmit: async (e) => {
     e.preventDefault();
-    const p = PROVIDERS[sel.value];
-    if (p.keyRequired && !key.value.trim()) { status.className = 'status-line err'; status.textContent = `${p.name} needs an API key.`; key.focus(); return; }
-    const conn = { id: uid(), providerId: p.id, name: name.value.trim() || p.name, baseUrl: base.value.trim() || p.defaultBaseUrl, apiKey: key.value.trim(), models: [...(p.defaultModels || [])], available: [], modelMeta: {} };
-    state.connections.push(conn);
-    persist();
-    renderConnections();
-    toast(`Added ${conn.name}.`);
-    if (p.discover) document.querySelector(`[data-conn="${conn.id}"] .inline button:last-child`)?.click();
+    if (!key.value.trim()) { status.className = 'status-line err'; status.textContent = 'Claude needs an API key.'; key.focus(); return; }
+    const conn = await connectWithKey({ apiKey: key.value.trim(), name: name.value.trim(), baseUrl: base.value.trim() }, status);
+    if (conn) renderConnections();
   } },
-  h('strong', { text: 'Add a connection' }),
-  h('div', { class: 'grid-2', style: 'margin-top:10px' },
-    h('label', { class: 'field' }, h('span', { text: 'Provider' }), sel),
-    h('label', { class: 'field' }, h('span', { text: 'Name' }), name),
-    h('label', { class: 'field' }, h('span', { text: 'Base URL' }), base),
-    h('label', { class: 'field' }, keyLabel, key)),
-  blurb,
-  h('button', { class: 'btn btn-primary btn-small', type: 'submit', text: 'Save connection' }),
+  h('div', { class: 'grid-2' },
+    h('label', { class: 'field' }, h('span', { text: 'Anthropic API key' }), key),
+    h('label', { class: 'field' }, h('span', { text: 'Name (optional)' }), name)),
+  h('details', {}, h('summary', { class: 'conn-sub', text: 'Advanced' }), h('label', { class: 'field' }, h('span', { text: 'API base URL (only for an approved Claude gateway)' }), base)),
+  h('button', { class: 'btn btn-primary btn-small', type: 'submit', text: state.connections.length ? 'Add key' : 'Connect Claude' }),
   status);
-  return h('div', {}, h('h3', { text: 'Add another' }), form);
+  return h('div', {}, h('h3', { text: state.connections.length ? 'Add another key' : 'Connect Claude' }), form);
 }
 
 // ---- Model settings
@@ -738,7 +780,7 @@ function renderModelPanel() {
 
   const picker = h('select', { class: 'input', id: 'settings-target', 'aria-label': 'Model to configure', onchange: (e) => { state.editTarget = e.target.value; renderModelPanel(); } },
     models.map((m) => h('option', { value: m.key, selected: m.key === t.key || undefined, text: `${m.model} — ${m.connName}` })));
-  const { common, extras } = describeControls(t.providerId, t.model, meta);
+  const { common, extras } = describeControls(t.model, meta);
   const saved = savedFor(t.key);
   const summary = h('div', { id: 'settings-issues', 'aria-live': 'polite' });
   const preview = h('pre', { id: 'settings-preview' });
@@ -747,7 +789,7 @@ function renderModelPanel() {
   const refresh = () => {
     cleanupSaved(t.key);
     const cur = state.settings[t.key] || { params: {} };
-    const issues = validateSettings(t.providerId, t.model, meta, cur);
+    const issues = validateSettings(t.model, meta, cur);
     for (const row of panel.querySelectorAll('[data-param]')) {
       const id = row.dataset.param;
       const list = issues.filter((i) => i.param === id);
@@ -757,7 +799,9 @@ function renderModelPanel() {
       const st = row.querySelector('.state');
       if (st) {
         const def = [...common, ...extras].find((d) => d.id === id);
-        st.textContent = v === undefined ? (def?.required ? `Provider default (sends ${ANTHROPIC_DEFAULT_MAX_TOKENS})` : 'Provider default') : `Custom: ${Array.isArray(v) ? v.join(', ') : v}`;
+        const defaultText = def?.required ? `Default (sends ${defaultMaxTokens(cur.params?.stream === true).toLocaleString('en-US')})`
+          : def?.jarvisDefault !== undefined ? `Jarvis default: ${def.jarvisDefault ? 'on' : 'off'}` : 'Claude default';
+        st.textContent = v === undefined ? defaultText : `Custom: ${Array.isArray(v) ? v.join(', ') : v}`;
         st.classList.toggle('custom', v !== undefined);
         const reset = row.querySelector('.reset');
         if (reset) reset.disabled = v === undefined;
@@ -806,7 +850,7 @@ function renderModelPanel() {
         delete state.settings[t.key];
         persist();
         renderModelPanel();
-        toast('Every control is back to Provider default.', { label: 'Undo', run: () => { if (before) state.settings[t.key] = before; persist(); renderModelPanel(); } });
+        toast('Every control is back to its default.', { label: 'Undo', run: () => { if (before) state.settings[t.key] = before; persist(); renderModelPanel(); } });
       } })));
 
   // Advanced JSON
@@ -815,7 +859,7 @@ function renderModelPanel() {
   const jsonStatus = h('div', { class: 'issue' });
   const jsonRow = h('div', { class: 'param', dataset: { param: '__extra' } },
     h('div', { class: 'param-head' }, h('label', { for: 'advanced-json', text: 'Advanced JSON' })),
-    h('p', { class: 'desc', id: 'json-help', text: `Extra fields merged into the request body last, for options ${PROVIDERS[t.providerId].name} supports that the controls above don’t cover. Jarvis can’t check what these do.` }),
+    h('p', { class: 'desc', id: 'json-help', text: 'Extra Messages API fields merged into the request body last, for options the controls above don\u2019t cover, such as {"output_config": {"format": {"type": "json_schema", "schema": {}}}}. Jarvis can\u2019t check what these do.' }),
     jsonBox, jsonStatus);
   jsonBox.addEventListener('input', () => {
     const s = savedFor(t.key);
@@ -831,17 +875,16 @@ function renderModelPanel() {
   });
 
   const selectionNote = state.prefs.selection === 'auto'
-    ? 'Your next message goes to Auto, which picks a model when you send. If it picks this one, it uses exactly these settings.'
+    ? 'Your next message goes to Auto, which picks a Claude model when you send. If it picks this one, it uses exactly these settings.'
     : state.prefs.selection === t.key ? 'Your next message goes to this model.' : `Your next message goes to ${selectionLabel()}. These settings apply whenever this model answers.`;
 
   panel.append(
     h('label', { class: 'field' }, h('span', { text: 'Settings for' }), picker),
-    h('p', { class: 'lead', text: 'Every control starts at Provider default and is left out of the request until you change it. Settings are saved for this model on this connection only.' }),
-    t.demo ? h('p', { class: 'sim-badge', style: 'display:inline-block', text: 'Simulated model: only a few controls apply.' }) : null,
+    h('p', { class: 'lead', text: 'Every control starts at Claude\u2019s default and is left out of the request until you change it. Controls this model rejects are shown but switched off. Settings are saved for this model on this key only.' }),
     summary,
     h('h3', { text: 'Presets' }), presetRow,
     h('h3', { text: 'Generation' }), ...paramRows,
-    extraRows.length ? h('h3', { text: `${PROVIDERS[t.providerId].name} options` }) : null, ...extraRows,
+    extraRows.length ? h('h3', { text: 'Claude options' }) : null, ...extraRows,
     h('h3', { text: 'Anything else' }), jsonRow,
     h('h3', { text: 'Preview of the next request' }),
     h('p', { class: 'preview-meta', text: selectionNote }),
@@ -861,25 +904,25 @@ function paramRow(def, value, set) {
     set(def.id, v);
   };
   if (def.type === 'number' || def.type === 'integer') {
-    input = h('input', { class: 'input', id, type: 'number', inputmode: def.type === 'integer' ? 'numeric' : 'decimal', step: def.step ?? (def.type === 'integer' ? 1 : 0.01), min: def.min, max: def.max, placeholder: 'Provider default', value: value ?? '', disabled });
+    input = h('input', { class: 'input', id, type: 'number', inputmode: def.type === 'integer' ? 'numeric' : 'decimal', step: def.step ?? (def.type === 'integer' ? 1 : 0.01), min: def.min, max: def.max, placeholder: 'Claude default', value: value ?? '', disabled });
     input.addEventListener('input', () => onChange(input.value));
   } else if (def.type === 'enum') {
     input = h('select', { class: 'input', id, disabled },
-      h('option', { value: '', text: 'Provider default' }),
+      h('option', { value: '', text: 'Claude default' }),
       (def.options || []).map((o) => h('option', { value: o, text: o, selected: value === o || undefined })));
     input.addEventListener('change', () => onChange(input.value));
   } else if (def.type === 'boolean') {
     input = h('select', { class: 'input', id, disabled },
-      h('option', { value: '', text: 'Provider default' }),
+      h('option', { value: '', text: def.jarvisDefault !== undefined ? `Jarvis default (${def.jarvisDefault ? 'on' : 'off'})` : 'Claude default' }),
       h('option', { value: 'true', text: 'On', selected: value === true || undefined }),
       h('option', { value: 'false', text: 'Off', selected: value === false || undefined }));
     input.addEventListener('change', () => onChange(input.value));
   } else if (def.type === 'list') {
-    input = h('textarea', { class: 'input', id, rows: 2, placeholder: 'Provider default (one per line)', disabled });
+    input = h('textarea', { class: 'input', id, rows: 2, placeholder: 'Claude default (one per line)', disabled });
     input.value = Array.isArray(value) ? value.join('\n') : '';
     input.addEventListener('input', () => onChange(input.value));
   } else {
-    input = h('input', { class: 'input', id, type: 'text', placeholder: 'Provider default', value: value ?? '', disabled });
+    input = h('input', { class: 'input', id, type: 'text', placeholder: 'Claude default', value: value ?? '', disabled });
     input.addEventListener('input', () => onChange(input.value));
   }
   const range = (def.min !== undefined || def.max !== undefined) && (def.type === 'number' || def.type === 'integer')
@@ -924,10 +967,10 @@ function renderPreview(t, meta, saved, pre, metaBox) {
   if (typeof body.system === 'string') body.system = `[Jarvis system prompt, ${body.system.length} characters]`;
   if (body.systemInstruction) body.systemInstruction = '[Jarvis system prompt]';
   pre.textContent = `${req.method} ${req.url}\n${JSON.stringify(redactHeaders(req.headers), null, 2)}\n\n${JSON.stringify(body, null, 2)}`;
-  const { params } = effectiveParams(t.providerId, t.model, meta, saved);
-  const leftOut = describeControls(t.providerId, t.model, meta).common.filter((d) => d.support !== 'no' && params[d.id] === undefined).map((d) => d.label);
+  const { params } = effectiveParams(t.model, meta, saved);
+  const leftOut = describeControls(t.model, meta).common.filter((d) => d.support !== 'no' && params[d.id] === undefined).map((d) => d.label);
   metaBox.replaceChildren(
-    leftOut.length ? h('div', { text: `Left out, so ${PROVIDERS[t.providerId].name}’s defaults apply: ${leftOut.join(', ')}.` }) : null,
+    leftOut.length ? h('div', { text: `Left out, so Claude\u2019s defaults apply: ${leftOut.join(', ')}.` }) : null,
     req.skipped.length ? h('div', { class: 'issue-line warning', text: `Not sent because this model doesn’t support them: ${req.skipped.map((s) => s.label).join(', ')}.` }) : null,
   );
 }
@@ -940,12 +983,12 @@ function renderVoicePanel() {
   const panel = $('#panel-voice');
   const vs = state.voiceSettings;
   const langPrefix = (vs.lang || navigator.language || 'en').slice(0, 2).toLowerCase();
-  const voices = voice.voices();
+  const voices = voice.usableVoices();
   const matching = voices.filter((v) => v.lang?.toLowerCase().startsWith(langPrefix));
   const shown = matching.length ? matching : voices;
   const voiceSel = h('select', { class: 'input', id: 'voice-select' },
-    h('option', { value: '', text: 'Browser default voice' }),
-    shown.map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === vs.voiceURI || undefined, text: `${v.name} (${v.lang})${v.localService ? '' : ' · online'}` })));
+    h('option', { value: '', text: vs.allowCloud ? 'Browser default voice' : 'First on-device voice for this language' }),
+    shown.map((v) => h('option', { value: v.voiceURI, selected: v.voiceURI === vs.voiceURI || undefined, text: `${v.name} (${v.lang})${v.localService ? '' : ' \u00b7 online'}` })));
   const langSel = h('select', { class: 'input', id: 'voice-lang' }, LANGS.map(([v, n]) => h('option', { value: v, selected: v === vs.lang || undefined, text: n })));
   const rate = h('input', { type: 'range', id: 'voice-rate', min: 0.5, max: 2, step: 0.05, value: vs.rate || 1, style: 'width:100%' });
   const rateOut = h('output', { for: 'voice-rate', text: `${Number(vs.rate || 1).toFixed(2)}×` });
@@ -957,11 +1000,14 @@ function renderVoicePanel() {
   if (!voice.supported.recognition) support.push('This browser can’t transcribe speech, so Talk to Jarvis won’t work here. Chrome, Edge and Safari can.');
   if (!voice.supported.synthesis) support.push('This browser can’t read replies aloud.');
   panel.replaceChildren(
-    h('p', { class: 'lead', text: 'Jarvis uses your browser’s built-in voice features. The microphone only turns on when you tap Talk, and it is off while Jarvis speaks so it never hears itself.' }),
+    h('p', { class: 'lead', text: 'The microphone only turns on when you tap Talk, and it is off while Jarvis speaks so it never hears itself. By default all speech stays on this computer, so the only service Jarvis talks to is Claude.' }),
     ...support.map((s) => h('p', { class: 'notice', text: s })),
     h('label', { class: 'field' }, h('span', { text: 'Language (for listening and speaking)' }), langSel),
     h('label', { class: 'field' }, h('span', { text: 'Voice' }), voiceSel),
     h('div', { class: 'field' }, h('label', { for: 'voice-rate', text: 'Speed' }), h('div', { class: 'inline' }, rate, rateOut)),
+    h('label', { class: 'toggle' }, h('input', { type: 'checkbox', id: 'pref-cloud-speech', checked: vs.allowCloud || undefined, onchange: (e) => { vs.allowCloud = e.target.checked; vs.voiceURI = ''; commit(); renderVoicePanel(); } }),
+      h('span', { text: 'Allow the browser\u2019s online speech service (sends your voice or reply text to the browser maker, not only to Claude)' })),
+    !vs.allowCloud && !voices.length ? h('p', { class: 'notice', text: 'No on-device voices found, so replies won\u2019t be read aloud. Install a voice in your system\u2019s speech settings, or allow the online service above.' }) : null,
     h('label', { class: 'toggle' }, h('input', { type: 'checkbox', id: 'pref-handsfree', checked: state.prefs.handsfree || undefined, onchange: (e) => { state.prefs.handsfree = e.target.checked; persist(); setPhase(state.phase); } }), h('span', { text: 'Hands-free: listen again after Jarvis finishes speaking' })),
     h('label', { class: 'toggle' }, h('input', { type: 'checkbox', id: 'pref-speak-typed', checked: state.prefs.speakTyped || undefined, onchange: (e) => { state.prefs.speakTyped = e.target.checked; persist(); } }), h('span', { text: 'Also read replies to typed messages aloud' })),
     h('p', {}, h('button', { class: 'btn btn-small', type: 'button', text: 'Test voice', onclick: () => voice.speak('Hi, I’m Jarvis. This is how I sound.') })),
@@ -1002,16 +1048,15 @@ function renderGeneralPanel() {
     h('h3', { text: 'What Auto should favour' }),
     h('div', { role: 'radiogroup', 'aria-label': 'Auto priority' },
       radio('balanced', 'Balanced', 'A sensible mix of quality and speed.'),
-      radio('quality', 'Quality', 'Prefer your most capable models, even if slower.'),
-      radio('speed', 'Speed', 'Prefer your fastest models for snappy back-and-forth.')),
-    h('label', { class: 'toggle' }, h('input', { type: 'checkbox', id: 'pref-local', checked: state.prefs.preferLocal || undefined, onchange: (e) => { state.prefs.preferLocal = e.target.checked; persist(); } }), h('span', { text: 'Prefer models running on this computer' })),
-    h('p', { class: 'conn-sub', text: 'You can also leave individual models out of Auto under Connections.' }),
+      radio('quality', 'Quality', 'Prefer your most capable models, such as Opus, even if slower.'),
+      radio('speed', 'Speed', 'Prefer your fastest models, such as Haiku, for snappy back-and-forth.')),
+    h('p', { class: 'conn-sub', text: 'Auto chooses among your Claude models. Leave individual models out of Auto under Connections.' }),
     h('h3', { text: 'Animations' }),
     h('label', { class: 'field' }, h('span', { text: 'Orb and interface motion' }), motion),
     h('h3', { text: 'Data' }),
-    h('p', { class: 'conn-sub', text: 'Connections, keys, settings, memories and the current conversation are stored in this browser only.' }),
+    h('p', { class: 'conn-sub', text: 'Keys, settings, memories and the current conversation are stored on this computer only. The only service Jarvis sends anything to is Claude.' }),
     h('button', { class: 'btn btn-small btn-quiet btn-danger', type: 'button', text: 'Erase everything', onclick: () => {
-      if (!window.confirm('Erase all connections, keys, settings, memories and the conversation from this browser?')) return;
+      if (!window.confirm('Erase all keys, settings, memories and the conversation from this computer?')) return;
       for (const k of Object.keys(localStorage)) if (k.startsWith('jarvis.')) localStorage.removeItem(k);
       location.reload();
     } }),
@@ -1087,6 +1132,7 @@ document.addEventListener('keydown', (e) => {
 window.addEventListener('beforeunload', () => voice.shutdown());
 
 // Boot
+renderOnboarding();
 updateChip();
 renderLog();
 const lastAsst = [...state.messages].reverse().find((m) => m.role === 'assistant' && m.status === 'ok');

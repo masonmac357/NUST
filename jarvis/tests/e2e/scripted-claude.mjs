@@ -1,7 +1,7 @@
-// Jarvis Demo: a scripted, in-browser stand-in for a real model, so a first
-// visit works without any account. It follows the same reply format a real
-// model is asked to use (one question, <replies>, then a summary). It is
-// labelled "simulated" everywhere it appears.
+// A scripted stand-in for Claude used only by the tests (the mock Anthropic
+// server in harness.mjs answers with it). It follows the reply format Jarvis
+// asks Claude for: one question, <replies>, then a summary.
+
 
 const FILLER = /^(so|um+|uh+|well|okay|ok|hey jarvis|jarvis|hi|hello)[,.!\s]+/i;
 const LEAD = /^(i('ve| have) (got )?(an|this|a) idea (for|about|to)|i('m| am) thinking (of|about)|i want to|i'd like to|i would like to|i wanna|maybe|what if (i|we)|help me|i need to|my idea is( to)?|i'm trying to|i am trying to)\s+/i;

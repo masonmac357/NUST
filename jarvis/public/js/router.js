@@ -1,6 +1,6 @@
-// Auto: pick one of the connected models for each message, based on what the
-// message looks like and the person's stated priority. Everything here is a
-// transparent heuristic, and the reason it returns is shown next to the reply.
+// Auto: pick one of your Claude models for each message, from what the
+// message looks like and your stated priority. A transparent heuristic; the
+// reason it returns is shown next to the reply.
 
 const TASKS = {
   code: { label: 'a coding question', want: { code: 3, quality: 1 } },
@@ -21,16 +21,15 @@ export function classifyTask(text = '', { voice = false, turn = 0 } = {}) {
   return 'general';
 }
 
-export function profileModel(model, { local = false, demo = false } = {}) {
-  const m = model.toLowerCase();
-  const p = { quality: 2, speed: 2, code: 1, local, demo };
-  if (/(opus|fable|mythos|gpt-5(?![\w.-]*(mini|nano))|\bo3\b|o3-pro|\bo1\b|-pro\b|pro-|405b|235b|120b|70b|72b|large|deepseek-r1|ultra|gemini-[\d.]+-pro)/.test(m)) { p.quality = 4; p.speed = 1; }
-  if (/(sonnet|gpt-4\.1(?!-mini|-nano)|gpt-4o(?!-mini)|32b|27b|medium)/.test(m)) { p.quality = 3; p.speed = 2; }
-  if (/(mini|nano|flash|haiku|lite|instant|small|tiny|\b[1-9]b\b|:[1-9]b|-[1-9]b|turbo)/.test(m)) { p.speed = 4; p.quality = Math.min(p.quality, 2); }
-  if (/(coder|codestral|devstral|code)/.test(m)) p.code = 4;
-  else if (/(claude|gpt-5|gpt-4\.1|sonnet|opus|qwen3|deepseek)/.test(m)) p.code = 3;
-  if (local) p.speed += 0.5;
-  if (demo) { p.quality = 0; p.speed = 3; p.code = 0; }
+export function profileModel(model) {
+  const m = String(model).toLowerCase();
+  const p = { quality: 2, speed: 2, code: 3 };
+  if (/(opus|fable|mythos)/.test(m)) { p.quality = 4; p.speed = 1; p.code = 4; }
+  else if (/sonnet/.test(m)) { p.quality = 3; p.speed = 2.5; p.code = 4; }
+  else if (/haiku/.test(m)) { p.quality = 2; p.speed = 4; p.code = 2; }
+  // Newer generations edge out older ones of the same tier.
+  const gen = m.match(/-(\d)(?:-(\d))?(?:-|$)/);
+  if (gen) p.quality += (Number(gen[1]) + Number(gen[2] || 0) / 10) / 20;
   return p;
 }
 
@@ -40,23 +39,16 @@ const PRIORITY = {
   quality: { quality: 2.5, speed: 0.3 },
 };
 
-// candidates: [{ connId, connName, providerId, model, local, demo }]
-// prefs: { priority, preferLocal }
+// candidates: [{ key, model, ... }]; prefs: { priority }
 export function chooseModel(candidates, text, prefs = {}, ctx = {}) {
   if (!candidates.length) return null;
   const task = classifyTask(text, ctx);
   const want = TASKS[task].want;
   const pri = PRIORITY[prefs.priority] || PRIORITY.balanced;
-  const realExists = candidates.some((c) => !c.demo);
   const ranked = candidates.map((c) => {
-    const p = profileModel(c.model, c);
-    let score = 0;
-    score += (want.quality || 0) * p.quality * pri.quality;
-    score += (want.speed || 0) * p.speed * pri.speed;
-    score += (want.code || 0) * p.code;
+    const p = profileModel(c.model);
+    let score = (want.quality || 0) * p.quality * pri.quality + (want.speed || 0) * p.speed * pri.speed + (want.code || 0) * p.code;
     score += p.quality * pri.quality + p.speed * pri.speed * 0.5;
-    if (prefs.preferLocal && c.local && !c.demo) score += 12;
-    if (c.demo && realExists) score -= 100;
     return { ...c, score, profile: p };
   }).sort((a, b) => b.score - a.score);
   const best = ranked[0];
@@ -64,16 +56,14 @@ export function chooseModel(candidates, text, prefs = {}, ctx = {}) {
 }
 
 function explain(best, task, prefs, count) {
-  if (count === 1) return 'it is the only model you have connected';
-  const strengths = [];
+  if (count === 1) return 'it is the only Claude model you have turned on';
   const p = best.profile;
-  if (task === 'code' && p.code >= 3) strengths.push('strong at code');
+  const strengths = [];
+  if (task === 'code' && p.code >= 4) strengths.push('strong at code');
   if (p.quality >= 3 && (task === 'reasoning' || task === 'creative' || prefs.priority === 'quality')) strengths.push('one of your most capable models');
-  if (p.speed >= 4 && (task === 'quick' || prefs.priority === 'speed')) strengths.push('one of your fastest models');
-  if (prefs.preferLocal && best.local && !best.demo) strengths.push('runs locally, as you prefer');
+  if (p.speed >= 4 && (task === 'quick' || prefs.priority === 'speed')) strengths.push('your fastest model');
   const pri = prefs.priority && prefs.priority !== 'balanced' ? `, with your priority set to ${prefs.priority}` : '';
-  const why = strengths.length ? strengths.join(' and ') : 'the best overall fit among your models';
-  return `this looked like ${TASKS[task].label}${pri}, and it is ${why}`;
+  return `this looked like ${TASKS[task].label}${pri}, and it is ${strengths.length ? strengths.join(' and ') : 'the best overall fit among your models'}`;
 }
 
 export { TASKS };

@@ -1,53 +1,101 @@
 # Jarvis
 
-A voice-first assistant for turning a rough idea into something concrete. Talk or type, and Jarvis asks one useful question at a time, offers a few replies based on what you said, then sums up your goal in your words and suggests a next step.
+A voice-first desktop app for turning a rough idea into something concrete, powered only by Claude. Talk or type, and Jarvis asks one useful question at a time, offers a few replies based on what you said, then sums up your goal in your words and suggests a next step.
 
-It works out of the box with a built-in **simulated** demo model (no account, clearly labelled), and connects to as many real providers as you like.
+**Jarvis only talks to Claude.** The app's relay refuses every host except `api.anthropic.com`, and by default speech stays on your computer (see [Voice and privacy](#voice-and-privacy)).
 
-## Run it
+## Run it on your PC
 
-Needs Node 20 or newer. No dependencies to install.
+### Option 1: the ready-made app (nothing to install)
+
+Download the file for your computer and double-click it:
+
+| Computer | File |
+|---|---|
+| Windows 10/11 | `Jarvis-windows-x64.exe` |
+| Mac with Apple silicon (M1 or later) | `Jarvis-macos-arm64` |
+| Intel Mac | `Jarvis-macos-x64` |
+| Linux | `Jarvis-linux-x64` |
+
+Jarvis opens in its own window, using Microsoft Edge or Google Chrome in app mode (Windows already has Edge). Close the window to quit. A small console window stays open alongside it; that is the part that talks to Claude.
+
+The first time, Jarvis asks for your Anthropic API key. Create one at [platform.claude.com](https://platform.claude.com/settings/keys).
+
+First-launch warnings, because the app isn't code-signed:
+
+- **Windows:** SmartScreen may say "Windows protected your PC". Click **More info**, then **Run anyway**.
+- **macOS:** run `chmod +x Jarvis-macos-arm64` once, then right-click the file, choose **Open**, and confirm. If macOS still refuses, run `xattr -d com.apple.quarantine Jarvis-macos-arm64`.
+- **Linux:** run `chmod +x Jarvis-linux-x64`, then start it.
+
+### Option 2: from source
+
+Needs Node 20 or newer, with no dependencies to install:
 
 ```bash
 cd jarvis
 npm start
 ```
 
-Open http://127.0.0.1:4173 in Chrome, Edge or Safari (Firefox has no speech recognition, so typing works but talking does not).
+### Build the app files yourself
 
-`PORT=8080 npm start` changes the port. `JARVIS_LOG_REQUESTS=1 npm start` prints every outgoing model request to the terminal with keys hidden.
+Needs [Bun](https://bun.sh) (it compiles the app into a single file and can build for every platform from one machine):
+
+```bash
+cd jarvis
+npm run build:desktop
+```
+
+The files land in `jarvis/dist/`. Build just one platform with `node scripts/build-desktop.mjs windows` (or `macos`, `linux`).
 
 ## What's in it
 
-- **The orb.** Breathes slowly when idle, ripples with your microphone volume while listening, rotates while waiting for a reply, and moves while speaking until playback stops. Each state has a plain-language status line. It follows your system's reduced-motion setting, and Settings › General can switch animations on or off.
-- **Voice.** Live transcript while you speak, spoken replies, one tap (orb, Interrupt, or Esc) to cut in, optional hands-free mode that listens again after Jarvis finishes, and End conversation. The mic only opens when you tap Talk and is off while Jarvis speaks, so it never transcribes itself. Pick the voice, speed and language under Settings › Voice.
-- **Connections.** OpenAI, Anthropic, Google Gemini, Hugging Face Inference Providers, OpenRouter, Ollama, and any OpenAI-compatible server (LM Studio, vLLM, llama.cpp). Discover models or type an ID. Several connections can be active at once.
-- **Auto.** Picks a model per message from the kind of message (coding, planning, writing, quick reply) and your priority (balanced, quality, speed, prefer local). Every reply says which model answered and why. Switch models from the header at any time; the conversation carries over.
-- **Model settings.** Shows the controls the selected provider and model support, each marked Supported, May not work, or Not supported: temperature, top-p, top-k, output limit, stop sequences, seed, frequency and presence penalties, reasoning effort or budget, response format and streaming, plus provider-specific options and an Advanced JSON box. Every control starts at **Provider default** and is left out of the request until you change it. Settings are saved per connection and model, with named presets, restore defaults, inline validation of ranges and bad combinations, and a live preview of the next request.
-- **Errors you can fix.** When a provider rejects a setting, Jarvis names it, offers a "Fix …" button that jumps to that control, and keeps your message for Retry or Edit.
+- **The orb.** It breathes slowly when idle, ripples with your microphone volume while listening, and rotates while waiting for Claude. While Jarvis speaks it moves, and it settles the moment playback stops. Each state has a plain-language status line. It follows your system's reduced-motion setting, and Settings › General turns animations on or off.
+- **Voice.** You get a live transcript while you speak and spoken replies. One tap on the orb, Interrupt, or Esc cuts Jarvis off. Hands-free mode listens again after each reply, and End conversation clears the chat. The microphone only opens when you tap Talk and is off while Jarvis speaks, so it never transcribes itself. Pick the voice, speed and language in Settings › Voice.
+- **Claude models.** Opus 5.5, Sonnet 5.5 and Haiku 5.5 are on by default; Jarvis asks Anthropic which other models your key can use. You can add several keys (for separate accounts or workspaces).
+- **Auto.** For each message, Auto picks a Claude model from the kind of message (coding, planning, writing, quick reply) and your priority (balanced, quality, speed). Every reply says which model answered and why. Switch models from the header at any time; the conversation carries over.
+- **Model settings.** Each control is marked Supported, May not work, or Not supported for the exact model: temperature, top-p, top-k, output limit, stop sequences, reasoning effort or budget, and streaming. Claude-specific options are thinking summaries, inference region and refusal fallback, and an Advanced JSON box covers anything else (such as structured output schemas). Each control starts at Claude's default and is left out of the request until you change it. Settings are saved per key and model, with named presets, restore defaults, inline checks for out-of-range values and bad combinations, and a live preview of the next request.
+- **Errors you can fix.** When Claude rejects a setting, Jarvis names it, offers a "Fix …" button that jumps to that control, and keeps your message for Retry or Edit.
 - **Memory with consent.** When you state a lasting preference, Jarvis asks before remembering it. Settings › Memory lets you edit or delete anything.
+
+### Two defaults that are not Claude's own
+
+- **Output limit.** The API requires one, so Jarvis sends 16,000 tokens (64,000 when streaming) until you set your own.
+- **Refusal fallback.** On models that support it (Opus 5.5, Sonnet 5.5, Fable), Jarvis asks Anthropic to retry a declined request on another Claude model in the same call, and the reply shows when that happened. Turn it off per model under Model settings › Claude options.
+
+### Why sampling controls are greyed out
+
+Current Claude models (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable, Opus 4.7 and later) reject temperature, top-p and top-k, and think adaptively, so Jarvis disables those controls and offers reasoning effort instead. Older models you add, such as Sonnet 4.5, get the full sampling set and a thinking budget.
+
+## Voice and privacy
+
+Browsers' built-in speech features usually send audio (for recognition) or reply text (for "online" voices) to the browser maker's servers. That would break "only talks to Claude", so by default Jarvis:
+
+- uses **on-device speech recognition only**, where the browser offers it, and otherwise doesn't open the microphone. It explains why and offers an **Allow browser speech service** button.
+- reads replies aloud with **on-device voices only**.
+
+You can change this in Settings › Voice. Typing always works.
 
 ## Where things live
 
-Keys, settings, memories and the current conversation are stored in your browser's local storage. Model requests go from the page to the small local server (`server.js`, bound to 127.0.0.1), which forwards them to the provider. This avoids browser CORS blocks; nothing is sent anywhere else.
+Your keys, settings, memories and current conversation stay on your computer: in the app window's private profile (`%APPDATA%\Jarvis` on Windows, `~/Library/Application Support/Jarvis` on macOS, `~/.config/jarvis` on Linux). The app listens only on `127.0.0.1:47815` and forwards requests to `api.anthropic.com`.
 
-For Ollama, run `ollama serve` and pull a model first (`ollama pull llama3.2`). The default base URL is `http://localhost:11434`.
-
-## Model support notes
-
-Support levels come from each provider's documented API and are model-aware where it matters:
-
-- **Anthropic:** current Claude models (Opus 5.5, Sonnet 5.5, Fable, Opus 4.7 and later) reject temperature, top-p and top-k and think adaptively, so those controls are disabled and reasoning effort maps to `output_config.effort`. Older Claude models keep sampling controls and a thinking budget. Anthropic requires an output limit, so Jarvis sends 4096 while that control is on Provider default, and the panel says so.
-- **OpenAI:** o-series and GPT-5 reasoning models reject sampling settings and take reasoning effort; other models take the full sampling set.
-- **OpenRouter:** discovery reads each model's `supported_parameters`, so support is exact rather than guessed.
-- **Gemini:** discovery reads each model's output limit, maximum temperature and whether it thinks.
-- Anything Jarvis can't be sure of is marked **May not work** rather than hidden.
+To route through an approved Claude gateway, start Jarvis with `JARVIS_ALLOWED_HOSTS=your.gateway.host` and set the base URL under Settings › Connections › Edit connection. `JARVIS_PORT` changes the port; changing it starts with fresh settings.
 
 ## Tests
 
 ```bash
-npm test          # unit tests: request building, validation, error attribution, Auto, reply parsing
+npm test          # unit tests: request building, defaults, validation, error attribution, Auto, reply parsing
 npm run test:e2e  # browser tests (needs Playwright with Chromium available to require('playwright'))
 ```
 
-The browser suite runs the real server and page in Chromium against a mock provider that records the exact requests it receives. It covers a first conversation, voice with interruption and hands-free, a blocked microphone, a mid-chat model switch, two models with different settings, a rejected setting, pre-send validation, presets and Advanced JSON, reduced motion, phone layout and keyboard access, streaming and Stop. `SHOT_DIR=/some/folder npm run test:e2e` saves screenshots.
+The browser suite runs the real app in Chromium against a mock of Anthropic's API that records the exact requests it receives. It covers:
+
+- first-run key setup and a full conversation
+- voice with interruption and hands-free, plus the voice privacy gate and a blocked microphone
+- a mid-chat switch between two models with different settings
+- a rejected setting, pre-send validation, refusals and fallbacks
+- presets and Advanced JSON
+- reduced motion, phone layout and keyboard access, streaming and Stop
+- the relay refusing non-Claude hosts
+
+`SHOT_DIR=/some/folder npm run test:e2e` saves screenshots.
