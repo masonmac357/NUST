@@ -43,6 +43,12 @@
         ],
         "createdAt": "2026-11-14T02:18:15.485Z",
         "reason": "Claude Code, under Paul's 13 Nov ask to fix or ignore hook findings: .setting-segmented is a recessed track whose 2px inset holds raised caps; the caps carry their own padding, so the flush edge is the control's design"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "space grotesk",
+        "createdAt": "2026-11-25T23:00:19.324Z",
+        "reason": "Claude: Jarvis is a separate app in jarvis/ with its own type; the repo DESIGN.md describes the impeccable product, not this page"
       }
     ]
   },
